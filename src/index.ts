@@ -27,6 +27,7 @@ export interface Env {
 
 const ALLOWED_METHODS = ['OPTIONS', 'GET', 'HEAD'];
 
+const encoder = new TextEncoder();
 const isNotUndefined = <T>(x: T | undefined): x is T => x !== undefined;
 
 export default {
@@ -44,24 +45,32 @@ export default {
 			await Promise.all(
 				url.pathname.split('/').map(async (s) => {
 					if (/^[0-9a-f]{32}$/i.test(s)) {
-						return { name: s, player: `https://chzzk.naver.com/live/${s}`, chat: `https://chzzk.naver.com/live/${s}/chat` };
+						return {
+							type: 'chzzk',
+							id: s,
+							player: `https://chzzk.naver.com/live/${s}`,
+							chat: `https://chzzk.naver.com/live/${s}/chat`,
+						};
 					} else if (/^t:[a-z0-9_]{4,25}$/i.test(s)) {
 						s = s.slice(2);
 						return {
-							name: s,
+							type: 'twitch',
+							id: s,
 							player: `https://player.twitch.tv/?channel=${s}&parent=${url.hostname}`,
 							chat: `https://www.twitch.tv/embed/${s}/chat?darkpopout&parent=${url.hostname}`,
 						};
 					} else if (/^(?:[as]c?:)?[a-z0-9]{3,12}$/i.test(s)) {
 						s = s.split(':').pop()!;
 						return {
-							name: s,
+							type: 'soop',
+							id: s,
 							player: `https://play.sooplive.co.kr/${s}/embed${hasExtension ? '?showChat=true' : ''}`,
 							chat: `https://play.sooplive.co.kr/${s}?vtype=chat`,
 							extension: true,
 						};
 					} else if (s.startsWith('y:')) {
 						s = s.slice(2);
+						let name;
 						if (!/^[a-zA-Z0-9_\-]{11}$/.test(s)) {
 							let channel = '';
 							if (/^UC[a-zA-Z0-9_\-]{22}$/.test(s)) {
@@ -83,9 +92,16 @@ export default {
 								return;
 							}
 							s = match[1];
+
+							const match2 = html.match(/"author":"([^"]+)"/);
+							if (match2) {
+								name = match2[1];
+							}
 						}
 						return {
-							name: s,
+							type: 'youtube',
+							id: s,
+							name,
 							player: `https://www.youtube.com/embed/${s}?autoplay=1`,
 							chat: `https://www.youtube.com/live_chat?v=${s}&embed_domain=${url.hostname}&dark_theme=1`,
 						};
@@ -216,7 +232,7 @@ export default {
 						? stream
 								.map(
 									(s) =>
-										`<iframe src=${JSON.stringify(s.player)} name=${JSON.stringify(s.name)} frameborder="0" scrolling="no" allowfullscreen="true"></iframe>`,
+										`<iframe src=${JSON.stringify(s.player)} name=${JSON.stringify(s.id)} frameborder="0" scrolling="no" allowfullscreen="true"></iframe>`,
 								)
 								.join('\n\t\t\t\t')
 						: `<div>
@@ -242,7 +258,7 @@ export default {
 			</div>
 			<div id="chat-container">
 				<select id="chat-select">
-					${stream.map((s) => `<option value=${JSON.stringify(s.chat)}${s.extension && !hasExtension ? ` disabled>${s.name} [확장 프로그램 필요]` : `${s === initialChat ? ' selected' : ''}>${s.name}`}</option>`).join('\n\t\t\t\t\t')}
+					${stream.map((s) => `<option value=${JSON.stringify(s.chat)}${s.extension && !hasExtension ? ` disabled>${s.id} [확장 프로그램 필요]` : `${s === initialChat ? ' selected' : ''}>${s.id}`}</option>`).join('\n\t\t\t\t\t')}
 				</select>
 				<iframe src=${JSON.stringify(initialChat?.chat || 'about:blank')} frameborder="0" scrolling="no" id="chat"></iframe>
 			</div>
@@ -284,6 +300,10 @@ export default {
 				});
 			}
 
+			function setName(i, name) {
+				chatSelect.children[i].textContent = name;
+			}
+
 			adjustLayout();
 			window.addEventListener("resize", adjustLayout);
 			chat.addEventListener("load", adjustLayout);
@@ -300,17 +320,56 @@ export default {
 				}
 			});
 		</script>
-	</body>
-</html>
 `;
-		return new Response(html, {
-			headers: {
-				'content-type': 'text/html; charset=utf-8',
-				'content-security-policy':
-					"base-uri 'self'; default-src 'self'; script-src 'sha256-aLlVwXxg1hl9nKvoryAzGeQD2D3KIcdIyPXvQwJta/k='; style-src 'sha256-VEOn/bTnoQf9L9/RRz8HUsR9nRdGPaPuC2rh5RrrEHk='; frame-src 'self' chzzk.naver.com *.chzzk.naver.com *.twitch.tv *.sooplive.co.kr www.youtube.com; object-src 'none'",
-				'strict-transport-security': 'max-age=31536000; includeSubDomains',
-				'x-content-type-options': 'nosniff',
+		return new Response(
+			new ReadableStream({
+				start(controller) {
+					controller.enqueue(encoder.encode(html));
+					(async () => {
+						for (let i = 0; i < stream.length; i++) {
+							const s = stream[i];
+							let name;
+							switch (s.type) {
+								case 'chzzk': {
+									const res = await fetch(`https://api.chzzk.naver.com/service/v1/channels/${s.id}`);
+									const data = await res.json<any>();
+									name = data.content.channelName;
+									break;
+								}
+								case 'soop': {
+									const res = await fetch(`https://st.sooplive.co.kr/api/get_station_status.php?szBjId=${s.id}`);
+									const data = await res.json<any>();
+									name = data.DATA.user_nick;
+									break;
+								}
+							}
+							if (!name) {
+								continue;
+							}
+							controller.enqueue(encoder.encode(`		<script type="text/javascript">setName(${i}, ${JSON.stringify(name)});</script>`));
+						}
+						controller.enqueue(
+							encoder.encode(`	</body>
+</html>
+`),
+						);
+						controller.close();
+					})();
+				},
+				cancel(reason) {
+					console.log('Stream cancelled:', reason);
+				},
+			}),
+			{
+				headers: {
+					'content-type': 'text/html; charset=utf-8',
+					// 'content-security-policy':
+					// 	"base-uri 'self'; default-src 'self'; script-src 'sha256-aLlVwXxg1hl9nKvoryAzGeQD2D3KIcdIyPXvQwJta/k='; style-src 'sha256-VEOn/bTnoQf9L9/RRz8HUsR9nRdGPaPuC2rh5RrrEHk='; frame-src 'self' chzzk.naver.com *.chzzk.naver.com *.twitch.tv *.sooplive.co.kr www.youtube.com; object-src 'none'",
+					'strict-transport-security': 'max-age=31536000; includeSubDomains',
+					'x-accel-buffering': 'no',
+					'x-content-type-options': 'nosniff',
+				},
 			},
-		});
+		);
 	},
 };
